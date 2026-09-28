@@ -1,0 +1,61 @@
+name: Sign and Package Cracked Deb
+on:
+  workflow_dispatch:
+    inputs:
+      src_dir:
+        description: 'Path to deb tree inside repo'
+        required: false
+        default: 'com.zjx.ldys3_2.16.83_iphoneos-arm64e'
+
+jobs:
+  sign-package:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install ldid and dpkg
+        run: |
+          brew install ldid
+          brew install dpkg || true
+
+      - name: Re-sign binaries (ad-hoc)
+        run: |
+          SRC="${{ github.event.inputs.src_dir }}"
+          ldid -S "$SRC/Library/MobileSubstrate/DynamicLibraries/SpringBoardService.dylib"
+          ldid -S "$SRC/Library/MobileSubstrate/DynamicLibraries/BackboardService.dylib"
+          ldid -S "$SRC/usr/local/bin/ldysdaemon"
+          echo "--- verify signature ---"
+          ldid -e "$SRC/Library/MobileSubstrate/DynamicLibraries/SpringBoardService.dylib" || true
+          codesign -dv "$SRC/Library/MobileSubstrate/DynamicLibraries/SpringBoardService.dylib" 2>&1 || true
+
+      - name: Sanity check patched bytes (arm64e slice gates must be NOP)
+        run: |
+          SRC="${{ github.event.inputs.src_dir }}"
+          python3 - <<'EOF'
+          import struct
+          p = "${{ github.event.inputs.src_dir }}/Library/MobileSubstrate/DynamicLibraries/SpringBoardService.dylib"
+          b = open(p,'rb').read()
+          gates = [(0xa62184,'A cbz x19'),(0xa62188,'B cbz x20'),(0xa626e0,'C b.ne'),(0xa62788,'D cbz w21')]
+          ok = True
+          for off,name in gates:
+              ins = b[off:off+4]
+              status = 'NOP' if ins == bytes([0x1f,0x20,0x03,0xd5]) else '!! NOT PATCHED: '+ins.hex(' ')
+              print(f'gate {name} @0x{off:x}: {status}')
+              if ins != bytes([0x1f,0x20,0x03,0xd5]): ok = False
+          raise SystemExit(0 if ok else 1)
+          EOF
+
+      - name: Build deb
+        run: |
+          SRC="${{ github.event.inputs.src_dir }}"
+          mkdir -p out
+          dpkg-deb -Zgzip -b "$SRC" "out/ldys3-cracked.deb"
+          echo "--- deb info ---"
+          dpkg-deb -I "out/ldys3-cracked.deb" | head -20
+
+      - name: Upload deb artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ldys3-cracked-deb
+          path: out/ldys3-cracked.deb
